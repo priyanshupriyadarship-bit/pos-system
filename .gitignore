@@ -11,3 +11,4 @@ database/
 backend/client_secret.json
 client_secret.json
 *.json
+client_secret.json
