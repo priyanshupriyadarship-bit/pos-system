@@ -8,3 +8,6 @@ database/
 .DS_Store
 *.log
 .railway/
+backend/client_secret.json
+client_secret.json
+*.json
