@@ -1,9 +1,24 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime, timedelta
 import httpx
+import os
+
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+    from email.mime.text import MIMEText
+    import base64
+    import json
+    GOOGLE_AVAILABLE = True
+except ImportError:
+    GOOGLE_AVAILABLE = False
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
+
+SCOPES = ['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/calendar']
 
 class EmailMessage(BaseModel):
     to: str
@@ -14,74 +29,101 @@ class TelegramMessage(BaseModel):
     chat_id: str
     message: str
 
-class TelegramWebhook(BaseModel):
-    update_id: int
-    message: Optional[dict] = None
+class CalendarEvent(BaseModel):
+    title: str
+    start_time: datetime
+    duration_minutes: int = 60
+    description: Optional[str] = None
 
-# Health check
+def get_google_credentials():
+    if not GOOGLE_AVAILABLE:
+        return None
+    try:
+        creds_base64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
+        if creds_base64:
+            creds_json = base64.b64decode(creds_base64).decode()
+            token = os.getenv('GOOGLE_TOKEN')
+            if token:
+                return Credentials.from_authorized_user_info(json.loads(token), SCOPES)
+        return None
+    except Exception as e:
+        return None
+
 @router.get("/health")
 async def health_check():
-    return {"status": "ok", "gmail": "configured", "calendar": "configured", "telegram": "configured"}
+    return {"status": "ok", "telegram": "configured" if os.getenv("TELEGRAM_BOT_TOKEN") else "not configured"}
 
-# Send email
-@router.post("/gmail/send-email")
-async def send_email(email: EmailMessage):
-    return {"success": True, "sent_to": email.to}
-
-# Send Telegram message
 @router.post("/telegram/send-message")
 async def send_telegram_message(msg: TelegramMessage):
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        raise HTTPException(status_code=500, detail="Telegram not configured")
+    async with httpx.AsyncClient() as client:
+        await client.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": msg.chat_id, "text": msg.message})
     return {"success": True, "chat_id": msg.chat_id}
 
-# NEW: Telegram Webhook - Bot receives messages and responds!
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
-    import os
-    
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     data = await request.json()
-    
-    # Extract message
     if "message" not in data:
         return {"ok": True}
-    
     message = data["message"]
     chat_id = message["chat"]["id"]
     text = message.get("text", "")
-    
-    # Bot responses
-    response_text = ""
-    
     if text.lower() == "/start":
-        response_text = "👋 Hello! I'm your POS System Bot!\n\nI can help you with:\n- Task management\n- Calendar scheduling\n- Email notifications\n\nType 'help' for commands!"
+        response_text = "👋 Hello! I'm your POS System Bot!"
     elif text.lower() in ["hello", "hi", "hey"]:
-        response_text = f"Hi there! 😊 How can I help you today?"
+        response_text = "Hi there! 😊"
     elif text.lower() == "help":
-        response_text = "🤖 Available commands:\n/start - Start bot\n/help - Show this message\n/status - Check system status"
+        response_text = "🤖 Commands: /start, /help, /status"
     elif text.lower() == "/status":
-        response_text = "✅ POS System is online and working!"
+        response_text = "✅ Online!"
     elif "how are you" in text.lower():
-        response_text = "I'm doing great! Thanks for asking 😊"
-    elif "name" in text.lower():
-        response_text = f"Nice to meet you! I'm POS System Bot. What can I do for you?"
+        response_text = "I'm great! 😊"
     else:
-        response_text = f"You said: {text}\n\nType 'help' to see available commands!"
-    
-    # Send response back to user
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        response_text = f"You said: {text}"
     if bot_token:
         async with httpx.AsyncClient() as client:
-            await client.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": chat_id, "text": response_text}
-            )
-    
+            await client.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": response_text})
     return {"ok": True}
 
-# Calendar endpoints
+@router.post("/gmail/send-email")
+async def send_email(email: EmailMessage):
+    if not GOOGLE_AVAILABLE:
+        return {"success": False, "error": "Google libraries not installed"}
+    creds = get_google_credentials()
+    if not creds:
+        return {"success": False, "error": "Gmail not configured"}
+    try:
+        service = build('gmail', 'v1', credentials=creds)
+        message = MIMEText(email.body)
+        message['to'] = email.to
+        message['subject'] = email.subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        result = service.users().messages().send(userId='me', body={'raw': raw}).execute()
+        return {"success": True, "message_id": result['id']}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 @router.post("/calendar/create-event")
-async def create_calendar_event(title: str):
-    return {"success": True, "title": title}
+async def create_calendar_event(event: CalendarEvent):
+    if not GOOGLE_AVAILABLE:
+        return {"success": False, "error": "Not installed"}
+    creds = get_google_credentials()
+    if not creds:
+        return {"success": False, "error": "Not configured"}
+    try:
+        service = build('calendar', 'v3', credentials=creds)
+        end_time = event.start_time + timedelta(minutes=event.duration_minutes)
+        calendar_event = {'summary': event.title, 'start': {'dateTime': event.start_time.isoformat(), 'timeZone': 'Asia/Kolkata'}, 'end': {'dateTime': end_time.isoformat(), 'timeZone': 'Asia/Kolkata'}}
+        result = service.events().insert(calendarId='primary', body=calendar_event).execute()
+        return {"success": True, "event_id": result['id']}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 @router.get("/calendar/events")
 async def get_calendar_events(days: int = 7):
+    if not GOOGLE_AVAILABLE:
+        return {"success": False, "error": "Not installed"}
     return {"success": True, "events": []}
