@@ -1,3 +1,30 @@
+import os
+import json
+from google.oauth2.credentials import Credentials
+
+# ============================================
+# GOOGLE CREDENTIALS LOADER
+# ============================================
+GOOGLE_CREDENTIALS = None
+google_token_str = os.environ.get('GOOGLE_TOKEN')
+
+if google_token_str:
+    try:
+        token_data = json.loads(google_token_str)
+        GOOGLE_CREDENTIALS = Credentials(
+            token=token_data.get('token'),
+            refresh_token=token_data.get('refresh_token'),
+            token_uri=token_data.get('token_uri'),
+            client_id=token_data.get('client_id'),
+            client_secret=token_data.get('client_secret'),
+            scopes=token_data.get('scopes')
+        )
+        print("✅ Google credentials loaded successfully!")
+    except Exception as e:
+        print(f"❌ Error loading Google credentials: {e}")
+else:
+    print("⚠️ GOOGLE_TOKEN not found in environment variables")
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
