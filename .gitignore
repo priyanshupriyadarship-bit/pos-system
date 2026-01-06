@@ -12,3 +12,9 @@ backend/client_secret.json
 client_secret.json
 *.json
 client_secret.json
+get_token_auto.py
+get_token.py
+get_google_tokens.py
+oauth_setup.py
+oauth_setup.pytatab
+token.json
